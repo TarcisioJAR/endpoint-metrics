@@ -1,0 +1,72 @@
+{
+  "AWSTemplateFormatVersion": "2010-09-09",
+  "Resources": {
+    "EC2Instance": {
+      "Type": "AWS::EC2::Instance",
+      "Properties": {
+        "InstanceType": "t2.micro",
+        "ImageId": "ami-0fec2c2e2017f4e7b",
+        "IamInstanceProfile": {
+            "Ref": "InstanceProfile"
+        },
+        "UserData": {
+          "Fn::Base64": {
+            "Fn::Join": [
+              "",
+              [
+                "#!/bin/bash\n\nif [ \"$(id -u)\" -ne 0 ]; then\n        echo 'This script must be run by root' >&2\n        exit 1\nfi\n\necho 'Checking python pip'\napt update -qqq\napt install python3-pip -y -qqq\nmkdir -p $HOME/instance-metrics/\ncd $HOME/instance-metrics/\necho \"psutil\nboto3\nnetifaces\npy-cpuinfo\" >> requirements.txt\necho \"Installing Python dependencies\"\npython3 -m pip install -r requirements.txt -q\necho \"import requests\nimport platform\nimport psutil\nimport netifaces\nimport boto3\nfrom datetime import datetime\nimport cpuinfo\n\ndef main():\n    # SecretsManager secret name that stores the API endpoint to send the metrics\n    INSTANCE_METRICS_URL_SECRET_NAME = 'INSTANCE_METRICS_URL'\n    # SecretsManager secret name that stores the API Key for the API Gateway\n    INSTANCE_METRICS_APIKEYSECRET_SECRET_NAME = 'INSTANCE_METRICS_APIKEYSECRET'\n    # Region where the Secret is stored in Secret Manager\n    REGION = 'us-east-1'\n\n    # Collect system information\n    system_info = {}\n    system_info['processor'] = cpuinfo.get_cpu_info()['brand_raw']\n    system_info['running_processes'] = [p.info for p in psutil.process_iter(['pid', 'name'])]\n    system_info['users'] = [ {'user': user[0],\n                            'terminal': user[1],\n                            'host': user[2],\n                            'started': datetime.fromtimestamp(user[3]).strftime('%Y-%m-%d %H:%M:%S'),\n                            'pid': user[4] } for user in psutil.users()]\n    system_info['os_name'] = platform.system()\n    system_info['os_version'] = platform.version()\n    system_info['ip'] = get_ip_address()\n\n    # Create a Secrets Manager client\n    client = boto3.client('secretsmanager', region_name=REGION)\n\n    # Get Endpoint URL and API Key stored in Secret Manager\n    API_ENDPOINT = client.get_secret_value(SecretId=INSTANCE_METRICS_URL_SECRET_NAME)['SecretString']\n    API_KEY = client.get_secret_value(SecretId=INSTANCE_METRICS_APIKEYSECRET_SECRET_NAME)['SecretString']\n\n    # Send data to API\n    headers = {\n        'x-api-key': API_KEY\n    }\n    response = requests.post(API_ENDPOINT, json=system_info, headers=headers)\n\n    return response.json()\n\n# Return the first non-loopback interface IP\ndef get_ip_address():\n    interfaces = netifaces.interfaces()\n\n    for iface in interfaces:\n        if iface.startswith('lo'):\n            continue\n        addresses = netifaces.ifaddresses(iface)\n        if netifaces.AF_INET in addresses:\n            ip_address = addresses[netifaces.AF_INET][0]['addr']\n            break\n    return ip_address\n\nmain()\" >> instance-metrics.py\necho \"Creating a Cron Job\"\necho \"* * * * * /usr/bin/python3 $HOME/instance-metrics/instance-metrics.py\" | crontab -\necho \"Done\""
+              ]
+            ]
+          }
+        }
+      }
+    },
+    "InstanceProfile": {
+        "Type": "AWS::IAM::InstanceProfile",
+        "Properties": {
+          "Path": "/",
+          "Roles": [
+            {"Ref": "Ec2Role"}
+          ]
+        }
+      },
+    "Ec2Role": {
+        "Type": "AWS::IAM::Role",
+        "Properties": {
+          "AssumeRolePolicyDocument": {
+            "Version": "2012-10-17",
+            "Statement": [
+              {
+                "Effect": "Allow",
+                "Principal": {
+                  "Service": "ec2.amazonaws.com"
+                },
+                "Action": [
+                  "sts:AssumeRole"
+                ]
+              }
+            ]
+          },
+          "Path": "/",
+          "Policies": [
+            {
+              "PolicyName": "allow-bucket-putobject",
+              "PolicyDocument": {
+                "Version": "2012-10-17",
+                "Statement": [
+                  {
+                    "Effect": "Allow",
+                    "Action": "secretsmanager:GetSecretValue",
+                    "Resource": [
+                        "arn:aws:secretsmanager:*:*:secret:INSTANCE_METRICS_URL*",
+                        "arn:aws:secretsmanager:*:*:secret:INSTANCE_METRICS_APIKEYSECRET*"
+                    ]
+                  }
+                ]
+              }
+            }
+          ]
+        }
+      }
+  }
+}

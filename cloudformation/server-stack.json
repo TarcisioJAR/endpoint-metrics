@@ -1,0 +1,327 @@
+{
+  "Resources": {
+    "ApiGatewayRestApi": {
+      "Type": "AWS::ApiGateway::RestApi",
+      "Properties": {
+        "Name": "apigw-instance-metrics"
+      }
+    },
+    "PutMetricsResource": {
+      "Type": "AWS::ApiGateway::Resource",
+      "Properties": {
+        "ParentId": { "Fn::GetAtt": ["ApiGatewayRestApi", "RootResourceId"] },
+        "PathPart": "put-metrics",
+        "RestApiId": { "Ref": "ApiGatewayRestApi" }
+      }
+    },
+    "PutMetricsMethod": {
+      "Type": "AWS::ApiGateway::Method",
+      "Properties": {
+        "HttpMethod": "POST",
+        "ResourceId": { "Ref": "PutMetricsResource" },
+        "RestApiId": { "Ref": "ApiGatewayRestApi" },
+        "AuthorizationType": "NONE",
+        "ApiKeyRequired": true,
+        "Integration": {
+          "IntegrationHttpMethod": "POST",
+          "Type": "AWS",
+          "Uri": { "Fn::Sub": "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${LambdaFunction.Arn}/invocations" },
+          "IntegrationResponses": [
+            {
+              "StatusCode": 200,
+              "ResponseTemplates": {
+                "application/json": "$input.json('$')"
+              }
+            }
+          ]
+        },
+        "MethodResponses": [
+          {
+            "StatusCode": 200,
+            "ResponseModels": {
+              "application/json": "Empty"
+            }
+          }
+        ]
+      }
+    },
+    "LambdaFunction": {
+      "Type": "AWS::Lambda::Function",
+      "Properties": {
+        "FunctionName": "instance-metrics-server",
+        "Handler": "index.lambda_handler",
+        "Runtime": "python3.9",
+        "Code": {
+          "ZipFile": {
+            "Fn::Join": ["", [
+              "import datetime\n",
+              "import random\n",
+              "import json\n",
+              "import boto3\n",
+              "bucket_name = '",
+              {
+                "Fn::Join": [
+                  "",
+                  [
+                    "instance-metrics-logs-",
+                      { "Fn::Select": [0,
+                        {
+                          "Fn::Split": [
+                            "-",
+                            { "Fn::Select": [2, { "Fn::Split": ["/", { "Ref": "AWS::StackId" }] }] }
+                          ]
+                        }]
+                      }
+                  ]
+                ]
+              },
+              "'\n",
+              "def lambda_handler(event, context):\n",
+              "    print(event)\n",
+              "    try:\n",
+              "        ip = event['ip']\n",
+              "        processor = event['processor']\n",
+              "        running_processes = event['running_processes']\n",
+              "        users = event['users']\n",
+              "        os_name = event['os_name']\n",
+              "        os_version = event['os_version']\n",
+              "        data = {\n",
+              "            'ip': ip,\n",
+              "            'processor': processor,\n",
+              "            'running_processes': running_processes,\n",
+              "            'users': users,\n",
+              "            'os_name': os_name,\n",
+              "            'os_version': os_version\n",
+              "        }\n",
+              "        # Build filename for CSV file\n",
+              "        now = datetime.datetime.now()\n",
+              "        random_hex = ''.join(random.choice('0123456789abcdef') for _ in range(16))\n",
+              "        filename = f\"{ip}_{now.strftime('%Y-%m-%d')}_{random_hex}.json\"\n",
+              "        path = f\"{now.strftime('%Y/%m/%d/')}\"\n",
+              "        s3 = boto3.client('s3')\n",
+              "        json_string = json.dumps(data)\n",
+              "        \n",
+              "        # Write the JSON string to S3\n",
+              "        s3.put_object(Bucket=bucket_name, Key=path + filename, Body=json_string)\n",
+              "        return {\n",
+              "            'status_code': 200\n",
+              "        }\n",
+              "    except Exception as e:\n",
+              "        print(e)\n",
+              "        return {\n",
+              "            'status_code': 400\n",
+              "        }\n"
+              ]
+            ]
+          }
+        },
+        "Role": { "Fn::GetAtt": ["LambdaExecutionRole", "Arn"] }
+      }
+    },
+    "LambdaExecutionRole": {
+      "Type": "AWS::IAM::Role",
+      "Properties": {
+        "AssumeRolePolicyDocument": {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Effect": "Allow",
+              "Principal": {
+                "Service": "lambda.amazonaws.com"
+              },
+              "Action": [
+                "sts:AssumeRole"
+              ]
+            }
+          ]
+        },
+        "Path": "/",
+        "Policies": [
+          {
+            "PolicyName": "lambda-execution-logs",
+            "PolicyDocument": {
+              "Version": "2012-10-17",
+              "Statement": [
+                {
+                  "Effect": "Allow",
+                  "Action": [
+                    "logs:CreateLogGroup",
+                    "logs:CreateLogStream",
+                    "logs:PutLogEvents"
+                  ],
+                  "Resource": "arn:aws:logs:*:*:*"
+                }
+              ]
+            }
+          },
+          {
+            "PolicyName": "allow-bucket-putobject",
+            "PolicyDocument": {
+              "Version": "2012-10-17",
+              "Statement": [
+                {
+                  "Effect": "Allow",
+                  "Action": "s3:PutObject",
+                  "Resource": {
+                    "Fn::Join" : [
+                      "",
+                      [
+                        "arn:aws:s3:::",
+                        "instance-metrics-logs-",
+                        { "Fn::Select": [0,
+                          {
+                            "Fn::Split": [
+                              "-",
+                              { "Fn::Select": [2, { "Fn::Split": ["/", { "Ref": "AWS::StackId" }] }] }
+                            ]
+                          }]
+                        },
+                        "/*"
+                      ]
+                    ]
+                  }
+                }
+              ]
+            }
+          }
+        ]
+      }
+    },
+    "Deployment": {
+      "Type": "AWS::ApiGateway::Deployment",
+      "DependsOn": "PutMetricsMethod",
+      "Properties": {
+        "RestApiId": { "Ref": "ApiGatewayRestApi" },
+        "StageName": "Prod"
+      }
+    },
+    "ApiKey": {
+      "Type": "AWS::ApiGateway::ApiKey",
+      "DependsOn": "Deployment",
+      "Properties": {
+          "Name": "ApiKey",
+          "Enabled": true,
+            "Value": {
+              "Fn::Join": [
+                  "",
+                  [
+                      {
+                          "Fn::Join": [
+                              "",
+                              [
+                                  "{{resolve:secretsmanager:",
+                                  {
+                                      "Ref": "Secret"
+                                  },
+                                  ":SecretString}}"
+                              ]
+                          ]
+                      }
+                  ]
+              ]
+            },
+          "StageKeys": [
+              {
+                  "RestApiId": {
+                      "Ref": "ApiGatewayRestApi"
+                  },
+                  "StageName": "Prod"
+              }
+          ]
+      }
+    },
+    "UsagePlan": {
+      "Type": "AWS::ApiGateway::UsagePlan",
+      "DependsOn": "Deployment",
+      "Properties": {
+        "UsagePlanName": "UsagePlan",
+        "ApiStages": [
+          {
+            "ApiId": { "Ref": "ApiGatewayRestApi" },
+            "Stage": "Prod"
+          }
+        ],
+        "Quota": {
+          "Limit": 5000000,
+          "Period": "MONTH"
+        },
+        "Throttle": {
+          "BurstLimit": 100000,
+          "RateLimit": 500
+        }
+      }
+    },
+    "UsagePlanKey": {
+      "Type": "AWS::ApiGateway::UsagePlanKey",
+      "Properties": {
+        "KeyId": { "Ref": "ApiKey" },
+        "KeyType": "API_KEY",
+        "UsagePlanId": { "Ref": "UsagePlan" }
+      }
+    },
+    "Secret": {
+        "Type": "AWS::SecretsManager::Secret",
+        "Properties": {
+            "Name": "INSTANCE_METRICS_APIKEYSECRET",
+            "GenerateSecretString": {
+              "PasswordLength": 40,
+              "ExcludePunctuation": true
+          }
+        }
+    },
+    "URL": {
+      "Type": "AWS::SecretsManager::Secret",
+      "Properties": {
+          "Name": "INSTANCE_METRICS_URL",
+          "SecretString": {
+            "Fn::Join": [
+                "", [
+                    "https://",
+                    {"Ref": "ApiGatewayRestApi"},
+                    ".execute-api.",
+                    {"Ref": "AWS::Region"},
+                    ".amazonaws.com/Prod/put-metrics"
+                ]
+            ]
+        }
+      }
+  },
+    "LambdaPermission": {
+      "Type": "AWS::Lambda::Permission",
+      "Properties": {
+        "FunctionName": {
+          "Fn::GetAtt": [
+            "LambdaFunction",
+            "Arn"
+          ]
+        },
+        "Action": "lambda:InvokeFunction",
+        "Principal": "apigateway.amazonaws.com",
+        "SourceArn": {
+          "Fn::Sub": "arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${ApiGatewayRestApi}/*/*/*"
+        }
+      }
+    },
+    "BucketLogs": {
+      "Type" : "AWS::S3::Bucket",
+      "Properties" : {
+        "BucketName" : {
+          "Fn::Join": [
+            "",
+            [
+              "instance-metrics-logs-",
+                { "Fn::Select": [0,
+                  {
+                    "Fn::Split": [
+                      "-",
+                      { "Fn::Select": [2, { "Fn::Split": ["/", { "Ref": "AWS::StackId" }] }] }
+                    ]
+                  }]
+                }
+            ]
+          ]
+        }
+      }
+    }
+  }
+}
